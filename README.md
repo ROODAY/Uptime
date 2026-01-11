@@ -23,11 +23,12 @@ The version is defined **once** in `pubspec.yaml`. All builds, tags, and release
    This will:
    - Read version from `pubspec.yaml`
    - Build the Android APK
+   - Build the Windows executable and package it as a ZIP
    - Show you the exact commands to create the GitHub release
 
 3. **Create GitHub release**:
    - Follow the instructions shown by the script
-   - Upload the APK from the `releases/` folder
+   - Upload the APK and/or Windows ZIP from the `releases/` folder
    - Mark as pre-release for alpha/beta versions
 
 ### Version Bumping
@@ -84,6 +85,11 @@ Output: `build\windows\x64\runner\Debug\uptime.exe`
 flutter build windows --release
 ```
 Output: `build\windows\x64\runner\Release\uptime.exe`
+
+**Using the build script:**
+The `build_and_release.ps1` script automatically builds Windows and creates a ZIP file containing the executable and all required DLLs. Users can extract the ZIP and run `uptime.exe` directly - no installation required.
+
+**Note:** For a more professional installer (MSIX), you can use the `msix` package, but the ZIP approach is simpler and works well for distribution.
 
 ### Testing Notifications on Windows
 
