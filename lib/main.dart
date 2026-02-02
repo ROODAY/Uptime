@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
@@ -8,22 +9,77 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const String _themeModeKey = 'theme_mode';
 
 void main() {
   runApp(const MainApp());
 }
 
-class MainApp extends StatelessWidget {
+class MainApp extends StatefulWidget {
   const MainApp({super.key});
 
   @override
+  State<MainApp> createState() => _MainAppState();
+}
+
+class _MainAppState extends State<MainApp> {
+  ThemeMode _themeMode = ThemeMode.system;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadThemeMode();
+  }
+
+  Future<void> _loadThemeMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(_themeModeKey);
+    if (stored == null) return;
+    final mode = switch (stored) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+    if (mounted) setState(() => _themeMode = mode);
+  }
+
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    setState(() => _themeMode = mode);
+    final prefs = await SharedPreferences.getInstance();
+    final value = switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.dark => 'dark',
+      ThemeMode.system => 'system',
+    };
+    await prefs.setString(_themeModeKey, value);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const MaterialApp(home: UptimeScreen());
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(brightness: Brightness.light),
+      darkTheme: ThemeData(brightness: Brightness.dark),
+      themeMode: _themeMode,
+      home: UptimeScreen(
+        themeMode: _themeMode,
+        onThemeModeChanged: _setThemeMode,
+      ),
+    );
   }
 }
 
 class UptimeScreen extends StatefulWidget {
-  const UptimeScreen({super.key});
+  const UptimeScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
 
   @override
   State<UptimeScreen> createState() => _UptimeScreenState();
@@ -40,6 +96,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   bool isRunning = false;
   bool isPaused = false;
   Timer? _timer;
+  Timer? _windowsWarningTimer; // For Windows warning notification
+  Timer? _windowsPhaseSwitchTimer; // For Windows phase switch notification
   int _remainingSeconds = 0;
   int _walkCycleCounter = 0;
   bool developerMode = false;
@@ -49,6 +107,7 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   bool _didRequestPermissions = false;
   bool warningEnabled = true;
   bool keepScreenOn = false;
+  bool _notificationsInitialized = false;
   DateTime? _phaseStartTime; // Track when current phase started
   int _phaseDurationSeconds = 0; // Total duration of current phase
 
@@ -98,50 +157,116 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   Future<void> _initNotifications() async {
-    tz.initializeTimeZones();
-    final String currentTimeZone = await FlutterTimezone.getLocalTimezone();
-    tz.setLocalLocation(tz.getLocation(currentTimeZone));
+    try {
+      tz.initializeTimeZones();
+      
+      // FlutterTimezone might not work on Windows, so handle it gracefully
+      String currentTimeZone;
+      try {
+        currentTimeZone = await FlutterTimezone.getLocalTimezone();
+        tz.setLocalLocation(tz.getLocation(currentTimeZone));
+      } catch (e) {
+        // Fallback for platforms where FlutterTimezone doesn't work (like Windows)
+        if (kDebugMode) {
+          print('[DEBUG] FlutterTimezone failed, using system timezone: $e');
+        }
+        currentTimeZone = 'UTC'; // Fallback
+        tz.setLocalLocation(tz.getLocation(currentTimeZone));
+      }
 
-    flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-    
-    // Create notification channels explicitly (required for Android 8.0+)
-    const AndroidNotificationChannel phaseWarningChannel = AndroidNotificationChannel(
-      'phase_warning',
-      'Phase Warning',
-      description: 'Warn before phase ends',
-      importance: Importance.max,
-      playSound: true,
-      enableVibration: true,
-    );
-    
-    const AndroidNotificationChannel phaseSwitchChannel = AndroidNotificationChannel(
-      'phase_switch',
-      'Phase Switch',
-      description: 'Notify when phase switches',
-      importance: Importance.max,
-      playSound: true,
-      enableVibration: true,
-    );
-    
-    await flutterLocalNotificationsPlugin!
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(phaseWarningChannel);
-    
-    await flutterLocalNotificationsPlugin!
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(phaseSwitchChannel);
-    
-    const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const InitializationSettings initializationSettings =
-        InitializationSettings(android: initializationSettingsAndroid);
-    await flutterLocalNotificationsPlugin!.initialize(
-      initializationSettings,
-      onDidReceiveNotificationResponse: _onNotificationResponse,
-      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
-    );
+      flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+      
+      // Platform-specific initialization
+      if (Platform.isAndroid) {
+        // Create notification channels explicitly (required for Android 8.0+)
+        const AndroidNotificationChannel phaseWarningChannel = AndroidNotificationChannel(
+          'phase_warning',
+          'Phase Warning',
+          description: 'Warn before phase ends',
+          importance: Importance.max,
+          playSound: true,
+          enableVibration: true,
+        );
+        
+        const AndroidNotificationChannel phaseSwitchChannel = AndroidNotificationChannel(
+          'phase_switch',
+          'Phase Switch',
+          description: 'Notify when phase switches',
+          importance: Importance.max,
+          playSound: true,
+          enableVibration: true,
+        );
+        
+        await flutterLocalNotificationsPlugin!
+            .resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>()
+            ?.createNotificationChannel(phaseWarningChannel);
+        
+        await flutterLocalNotificationsPlugin!
+            .resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>()
+            ?.createNotificationChannel(phaseSwitchChannel);
+        
+        const AndroidInitializationSettings initializationSettingsAndroid =
+            AndroidInitializationSettings('@mipmap/ic_launcher');
+        const InitializationSettings initializationSettings =
+            InitializationSettings(android: initializationSettingsAndroid);
+        final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+          initializationSettings,
+          onDidReceiveNotificationResponse: _onNotificationResponse,
+          onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+        );
+        _notificationsInitialized = initialized ?? false;
+        if (kDebugMode) {
+          print('[DEBUG] Android notifications initialized: ${initialized ?? false}');
+        }
+      } else if (Platform.isWindows) {
+        // Windows initialization - use Windows-specific settings
+        try {
+          const WindowsInitializationSettings initializationSettingsWindows =
+              WindowsInitializationSettings(
+            appName: 'Uptime',
+            appUserModelId: 'com.example.Uptime',
+            guid: '91ed2d00-88a5-4d3a-952c-19df33332fbc',
+          );
+          const InitializationSettings initializationSettings =
+              InitializationSettings(windows: initializationSettingsWindows);
+          final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+            initializationSettings,
+            onDidReceiveNotificationResponse: _onNotificationResponse,
+            onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+          );
+          _notificationsInitialized = initialized ?? false;
+          if (kDebugMode) {
+            print('[DEBUG] Windows notifications initialized: ${initialized ?? false}');
+            if (!_notificationsInitialized) {
+              print('[WARNING] Windows notification initialization returned false or null');
+            }
+          }
+        } catch (initError) {
+          print('[ERROR] Windows notification initialization failed: $initError');
+          _notificationsInitialized = false;
+          rethrow;
+        }
+      } else {
+        // Fallback for other platforms (iOS, macOS, Linux)
+        const InitializationSettings initializationSettings =
+            InitializationSettings();
+        final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+          initializationSettings,
+          onDidReceiveNotificationResponse: _onNotificationResponse,
+          onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+        );
+        _notificationsInitialized = initialized ?? false;
+        if (kDebugMode) {
+          print('[DEBUG] Notifications initialized for other platform: ${initialized ?? false}');
+        }
+      }
+    } catch (e, stackTrace) {
+      print('[ERROR] Failed to initialize notifications: $e');
+      print('[ERROR] Stack trace: $stackTrace');
+      _notificationsInitialized = false;
+    }
   }
 
   void _onNotificationResponse(NotificationResponse response) {
@@ -153,6 +278,11 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   Future<bool> _requestNotificationPermission() async {
+    // Windows doesn't require notification permissions
+    if (Platform.isWindows) {
+      return true;
+    }
+    
     final platform = Theme.of(context).platform;
     if (platform == TargetPlatform.android) {
       // Request notification permission (required for Android 13+)
@@ -217,78 +347,119 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
     final int warnSeconds = warningTime * (useSeconds ? 1 : 60);
     final int scheduleDelay = _remainingSeconds - warnSeconds;
     
-    // Check notification permission (required)
-    final notificationStatus = await Permission.notification.status;
-    if (!notificationStatus.isGranted) {
-      print('[ERROR] Notification permission not granted');
-      return;
-    }
-    
-    // Check exact alarm permission (recommended but not always required)
-    final alarmStatus = await Permission.scheduleExactAlarm.status;
-    final bool canScheduleExact = alarmStatus.isGranted;
-    
-    print('[DEBUG] Scheduling warning: delay=$scheduleDelay seconds, exact=$canScheduleExact');
+    // Check notification permission (Android only)
+    if (Platform.isAndroid) {
+      final notificationStatus = await Permission.notification.status;
+      if (!notificationStatus.isGranted) {
+        print('[ERROR] Notification permission not granted');
+        return;
+      }
+      
+      // Check exact alarm permission (recommended but not always required)
+      final alarmStatus = await Permission.scheduleExactAlarm.status;
+      final bool canScheduleExact = alarmStatus.isGranted;
+      
+      print('[DEBUG] Scheduling warning: delay=$scheduleDelay seconds, exact=$canScheduleExact');
 
-    final String delayUnit = useSeconds ? 'sec' : 'min';
-    final notificationDetails = AndroidNotificationDetails(
-      'phase_warning',
-      'Phase Warning',
-      channelDescription: 'Warn before phase ends',
-      importance: Importance.max,
-      priority: Priority.high,
-      icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
-      enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 200, 100, 200]), // Short vibration pattern
-      actions: <AndroidNotificationAction>[
-        AndroidNotificationAction('delay5', 'Delay 5 $delayUnit'),
-        AndroidNotificationAction('delay10', 'Delay 10 $delayUnit'),
-      ],
-    );
+      final String delayUnit = useSeconds ? 'sec' : 'min';
+      final notificationDetails = AndroidNotificationDetails(
+        'phase_warning',
+        'Phase Warning',
+        channelDescription: 'Warn before phase ends',
+        importance: Importance.max,
+        priority: Priority.high,
+        icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList([0, 200, 100, 200]), // Short vibration pattern
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction('delay5', 'Delay 5 $delayUnit'),
+          AndroidNotificationAction('delay10', 'Delay 10 $delayUnit'),
+        ],
+      );
 
-    if (scheduleDelay <= 0) {
-      // If the warning time has already passed, show immediately
-      await flutterLocalNotificationsPlugin!.show(
-        0,
-        'Phase ending soon',
-        'Current phase ($currentPhase) will end soon. Delay?',
-        NotificationDetails(android: notificationDetails),
-      );
-      return;
-    }
-    
-    final scheduledTime = tz.TZDateTime.now(
-      tz.local,
-    ).add(Duration(seconds: scheduleDelay));
-    
-    if (kDebugMode) {
-      print('[DEBUG] Scheduling warning notification for: $scheduledTime, curTime: ${DateTime.now()}');
-    }
-    
-    // Use exact scheduling if permission is granted, otherwise use inexact
-    try {
-      await flutterLocalNotificationsPlugin!.zonedSchedule(
-        0,
-        'Phase ending soon',
-        'Current phase ($currentPhase) will end soon. Delay?',
-        scheduledTime,
-        NotificationDetails(android: notificationDetails),
-        androidScheduleMode: canScheduleExact 
-            ? AndroidScheduleMode.exactAllowWhileIdle 
-            : AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-      );
-      print('[DEBUG] Warning notification scheduled successfully for $scheduledTime');
-    } catch (e) {
-      print('[ERROR] Failed to schedule warning notification: $e');
-      // Fallback: show immediately if scheduling fails
-      await flutterLocalNotificationsPlugin!.show(
-        0,
-        'Phase ending soon',
-        'Current phase ($currentPhase) will end soon. Delay?',
-        NotificationDetails(android: notificationDetails),
-      );
+      if (scheduleDelay <= 0) {
+        // If the warning time has already passed, show immediately
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon. Delay?',
+          NotificationDetails(android: notificationDetails),
+        );
+        return;
+      }
+      
+      final scheduledTime = tz.TZDateTime.now(
+        tz.local,
+      ).add(Duration(seconds: scheduleDelay));
+      
+      if (kDebugMode) {
+        print('[DEBUG] Scheduling warning notification for: $scheduledTime, curTime: ${DateTime.now()}');
+      }
+      
+      // Use exact scheduling if permission is granted, otherwise use inexact
+      try {
+        await flutterLocalNotificationsPlugin!.zonedSchedule(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon. Delay?',
+          scheduledTime,
+          NotificationDetails(android: notificationDetails),
+          androidScheduleMode: canScheduleExact 
+              ? AndroidScheduleMode.exactAllowWhileIdle 
+              : AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+        print('[DEBUG] Warning notification scheduled successfully for $scheduledTime');
+      } catch (e) {
+        print('[ERROR] Failed to schedule warning notification: $e');
+        // Fallback: show immediately if scheduling fails
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon. Delay?',
+          NotificationDetails(android: notificationDetails),
+        );
+      }
+    } else if (Platform.isWindows) {
+      // Windows doesn't support zonedSchedule, so we use a Timer instead
+      print('[DEBUG] Scheduling warning: delay=$scheduleDelay seconds');
+      
+      if (scheduleDelay <= 0) {
+        // If the warning time has already passed, show immediately
+        const WindowsNotificationDetails windowsNotificationDetails =
+            WindowsNotificationDetails();
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon.',
+          const NotificationDetails(windows: windowsNotificationDetails),
+        );
+        return;
+      }
+      
+      // Cancel any existing Windows warning timer
+      _windowsWarningTimer?.cancel();
+      
+      // Use a Timer to show the notification after the delay
+      _windowsWarningTimer = Timer(Duration(seconds: scheduleDelay), () async {
+        const WindowsNotificationDetails windowsNotificationDetails =
+            WindowsNotificationDetails();
+        try {
+          await flutterLocalNotificationsPlugin!.show(
+            0,
+            'Phase ending soon',
+            'Current phase ($currentPhase) will end soon.',
+            const NotificationDetails(windows: windowsNotificationDetails),
+          );
+          print('[DEBUG] Warning notification shown via Timer');
+        } catch (e) {
+          print('[ERROR] Failed to show warning notification: $e');
+        }
+      });
+      
+      if (kDebugMode) {
+        final scheduledTime = DateTime.now().add(Duration(seconds: scheduleDelay));
+        print('[DEBUG] Warning notification scheduled via Timer for: $scheduledTime');
+      }
     }
   }
 
@@ -301,79 +472,131 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       return;
     }
     
-    // Check notification permission (required)
-    final notificationStatus = await Permission.notification.status;
-    if (!notificationStatus.isGranted) {
-      print('[ERROR] Notification permission not granted');
-      return;
-    }
-    
-    // Check exact alarm permission (recommended but not always required)
-    final alarmStatus = await Permission.scheduleExactAlarm.status;
-    final bool canScheduleExact = alarmStatus.isGranted;
-    
-    print('[DEBUG] Scheduling phase switch: nextPhase=$nextPhase, delay=$secondsUntilSwitch seconds, exact=$canScheduleExact');
+    if (Platform.isAndroid) {
+      // Check notification permission (required)
+      final notificationStatus = await Permission.notification.status;
+      if (!notificationStatus.isGranted) {
+        print('[ERROR] Notification permission not granted');
+        return;
+      }
+      
+      // Check exact alarm permission (recommended but not always required)
+      final alarmStatus = await Permission.scheduleExactAlarm.status;
+      final bool canScheduleExact = alarmStatus.isGranted;
+      
+      print('[DEBUG] Scheduling phase switch: nextPhase=$nextPhase, delay=$secondsUntilSwitch seconds, exact=$canScheduleExact');
 
-    final notificationDetails = AndroidNotificationDetails(
-      'phase_switch',
-      'Phase Switch',
-      channelDescription: 'Notify when phase switches',
-      importance: Importance.max,
-      priority: Priority.high,
-      icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
-      enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 250, 250, 250]), // Vibrate pattern: wait 0ms, vibrate 250ms, pause 250ms, vibrate 250ms
-    );
+      final notificationDetails = AndroidNotificationDetails(
+        'phase_switch',
+        'Phase Switch',
+        channelDescription: 'Notify when phase switches',
+        importance: Importance.max,
+        priority: Priority.high,
+        icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList([0, 250, 250, 250]), // Vibrate pattern: wait 0ms, vibrate 250ms, pause 250ms, vibrate 250ms
+      );
 
-    if (secondsUntilSwitch <= 0) {
-      // Cancel the warning notification (ID 0) when phase switch happens
-      await flutterLocalNotificationsPlugin!.cancel(0);
-      await flutterLocalNotificationsPlugin!.show(
-        1,
-        'Phase switched',
-        'It\'s time to $nextPhase!',
-        NotificationDetails(android: notificationDetails),
-      );
-      return;
-    }
-    
-    final curTime = tz.TZDateTime.now(tz.local);
-    final scheduledTime = curTime.add(Duration(seconds: secondsUntilSwitch));
-    
-    print('[DEBUG] Scheduling phase switch notification for: $scheduledTime, nextPhase: $nextPhase');
-    
-    // Use exact scheduling if permission is granted, otherwise use inexact
-    // Note: matchDateTimeComponents is removed as it's for recurring notifications only
-    try {
-      await flutterLocalNotificationsPlugin!.zonedSchedule(
-        1,
-        'Phase switched',
-        'It\'s time to $nextPhase!',
-        scheduledTime,
-        NotificationDetails(android: notificationDetails),
-        androidScheduleMode: canScheduleExact 
-            ? AndroidScheduleMode.exactAllowWhileIdle 
-            : AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-      );
-      print('[DEBUG] Phase switch notification scheduled successfully for $scheduledTime (now: ${DateTime.now()})');
-    } catch (e) {
-      print('[ERROR] Failed to schedule phase switch notification: $e');
-      // Fallback: show immediately if scheduling fails
-      await flutterLocalNotificationsPlugin!.cancel(0);
-      await flutterLocalNotificationsPlugin!.show(
-        1,
-        'Phase switched',
-        'It\'s time to $nextPhase!',
-        NotificationDetails(android: notificationDetails),
-      );
-    }
-    
-    // Cancel the warning notification when phase switch is scheduled
-    // We'll also cancel it when the notification actually fires, but this helps if timing is close
-    if (secondsUntilSwitch <= 5) {
-      await flutterLocalNotificationsPlugin!.cancel(0);
+      if (secondsUntilSwitch <= 0) {
+        // Cancel the warning notification (ID 0) when phase switch happens
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          NotificationDetails(android: notificationDetails),
+        );
+        return;
+      }
+      
+      final curTime = tz.TZDateTime.now(tz.local);
+      final scheduledTime = curTime.add(Duration(seconds: secondsUntilSwitch));
+      
+      print('[DEBUG] Scheduling phase switch notification for: $scheduledTime, nextPhase: $nextPhase');
+      
+      // Use exact scheduling if permission is granted, otherwise use inexact
+      // Note: matchDateTimeComponents is removed as it's for recurring notifications only
+      try {
+        await flutterLocalNotificationsPlugin!.zonedSchedule(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          scheduledTime,
+          NotificationDetails(android: notificationDetails),
+          androidScheduleMode: canScheduleExact 
+              ? AndroidScheduleMode.exactAllowWhileIdle 
+              : AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+        print('[DEBUG] Phase switch notification scheduled successfully for $scheduledTime (now: ${DateTime.now()})');
+      } catch (e) {
+        print('[ERROR] Failed to schedule phase switch notification: $e');
+        // Fallback: show immediately if scheduling fails
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          NotificationDetails(android: notificationDetails),
+        );
+      }
+      
+      // Cancel the warning notification when phase switch is scheduled
+      // We'll also cancel it when the notification actually fires, but this helps if timing is close
+      if (secondsUntilSwitch <= 5) {
+        await flutterLocalNotificationsPlugin!.cancel(0);
+      }
+    } else if (Platform.isWindows) {
+      // Windows doesn't support zonedSchedule, so we use a Timer instead
+      print('[DEBUG] Scheduling phase switch: nextPhase=$nextPhase, delay=$secondsUntilSwitch seconds');
+      
+      const WindowsNotificationDetails windowsNotificationDetails =
+          WindowsNotificationDetails();
+
+      if (secondsUntilSwitch <= 0) {
+        // Cancel the warning notification (ID 0) when phase switch happens
+        _windowsWarningTimer?.cancel();
+        _windowsPhaseSwitchTimer?.cancel();
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          const NotificationDetails(windows: windowsNotificationDetails),
+        );
+        return;
+      }
+      
+      // Cancel any existing Windows phase switch timer
+      _windowsPhaseSwitchTimer?.cancel();
+      
+      // Use a Timer to show the notification after the delay
+      _windowsPhaseSwitchTimer = Timer(Duration(seconds: secondsUntilSwitch), () async {
+        try {
+          // Cancel warning notification when phase switch fires
+          _windowsWarningTimer?.cancel();
+          await flutterLocalNotificationsPlugin!.cancel(0);
+          await flutterLocalNotificationsPlugin!.show(
+            1,
+            'Phase switched',
+            'It\'s time to $nextPhase!',
+            const NotificationDetails(windows: windowsNotificationDetails),
+          );
+          print('[DEBUG] Phase switch notification shown via Timer');
+        } catch (e) {
+          print('[ERROR] Failed to show phase switch notification: $e');
+        }
+      });
+      
+      if (kDebugMode) {
+        final scheduledTime = DateTime.now().add(Duration(seconds: secondsUntilSwitch));
+        print('[DEBUG] Phase switch notification scheduled via Timer for: $scheduledTime, nextPhase: $nextPhase');
+      }
+      
+      // Cancel the warning notification when phase switch is very close
+      if (secondsUntilSwitch <= 5) {
+        _windowsWarningTimer?.cancel();
+        await flutterLocalNotificationsPlugin!.cancel(0);
+      }
     }
   }
 
@@ -474,31 +697,56 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   
   Future<void> _handlePhaseCompleteNotifications(String nextPhase) async {
     // Cancel warning notification when phase completes
+    _windowsWarningTimer?.cancel();
+    _windowsPhaseSwitchTimer?.cancel();
     await flutterLocalNotificationsPlugin?.cancel(0);
+    await flutterLocalNotificationsPlugin?.cancel(1);
     
-    // Show phase switch notification immediately as fallback
-    final notificationStatus = await Permission.notification.status;
-    if (notificationStatus.isGranted && flutterLocalNotificationsPlugin != null) {
-      final notificationDetails = AndroidNotificationDetails(
-        'phase_switch',
-        'Phase Switch',
-        channelDescription: 'Notify when phase switches',
-        importance: Importance.max,
-        priority: Priority.high,
-        icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
-        enableVibration: true,
-        vibrationPattern: Int64List.fromList([0, 250, 250, 250]),
-      );
-      try {
-        await flutterLocalNotificationsPlugin!.show(
-          1,
-          'Phase switched',
-          'It\'s time to $nextPhase!',
-          NotificationDetails(android: notificationDetails),
-        );
-        print('[DEBUG] Phase switch notification shown immediately');
-      } catch (e) {
-        print('[ERROR] Failed to show phase switch notification: $e');
+    // Show phase switch notification immediately (the scheduled one might have already fired or will be cancelled)
+    if (flutterLocalNotificationsPlugin != null) {
+      if (Platform.isAndroid) {
+        final notificationStatus = await Permission.notification.status;
+        if (notificationStatus.isGranted) {
+          final notificationDetails = AndroidNotificationDetails(
+            'phase_switch',
+            'Phase Switch',
+            channelDescription: 'Notify when phase switches',
+            importance: Importance.max,
+            priority: Priority.high,
+            icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
+            enableVibration: true,
+            vibrationPattern: Int64List.fromList([0, 250, 250, 250]),
+          );
+          try {
+            await flutterLocalNotificationsPlugin!.show(
+              1,
+              'Phase switched',
+              'It\'s time to $nextPhase!',
+              NotificationDetails(android: notificationDetails),
+            );
+            print('[DEBUG] Phase switch notification shown immediately');
+          } catch (e) {
+            print('[ERROR] Failed to show phase switch notification: $e');
+          }
+        }
+      } else if (Platform.isWindows) {
+        // Windows doesn't need permission checks
+        // Cancel any pending timers first
+        _windowsWarningTimer?.cancel();
+        _windowsPhaseSwitchTimer?.cancel();
+        try {
+          const WindowsNotificationDetails windowsNotificationDetails =
+              WindowsNotificationDetails();
+          await flutterLocalNotificationsPlugin!.show(
+            1,
+            'Phase switched',
+            'It\'s time to $nextPhase!',
+            const NotificationDetails(windows: windowsNotificationDetails),
+          );
+          print('[DEBUG] Phase switch notification shown immediately');
+        } catch (e) {
+          print('[ERROR] Failed to show phase switch notification: $e');
+        }
       }
     }
     
@@ -595,10 +843,22 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   void _cancelAllNotifications() {
+    _windowsWarningTimer?.cancel();
+    _windowsPhaseSwitchTimer?.cancel();
     flutterLocalNotificationsPlugin?.cancelAll();
   }
 
   Future<void> _testNotification() async {
+    // Wait for initialization to complete if it's still in progress
+    if (!_notificationsInitialized) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Notifications are still initializing. Please wait...')),
+        );
+      }
+      return;
+    }
+    
     if (flutterLocalNotificationsPlugin == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -608,38 +868,60 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       return;
     }
 
-    final notificationStatus = await Permission.notification.status;
-    if (!notificationStatus.isGranted) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Notification permission not granted. Please grant permission first.'),
-          ),
+    try {
+      if (Platform.isAndroid) {
+        final notificationStatus = await Permission.notification.status;
+        if (!notificationStatus.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Notification permission not granted. Please grant permission first.'),
+              ),
+            );
+          }
+          return;
+        }
+
+        const notificationDetails = AndroidNotificationDetails(
+          'phase_switch',
+          'Phase Switch',
+          channelDescription: 'Notify when phase switches',
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
         );
-      }
-      return;
+
+        await flutterLocalNotificationsPlugin!.show(
+          999,
+          'Test Notification',
+          'If you see this, notifications are working!',
+          NotificationDetails(android: notificationDetails),
+        );
+    } else if (Platform.isWindows) {
+      // Windows doesn't need permission checks
+      const WindowsNotificationDetails windowsNotificationDetails =
+          WindowsNotificationDetails();
+      await flutterLocalNotificationsPlugin!.show(
+        999,
+        'Test Notification',
+        'If you see this, notifications are working!',
+        const NotificationDetails(windows: windowsNotificationDetails),
+      );
     }
 
-    const notificationDetails = AndroidNotificationDetails(
-      'phase_switch',
-      'Phase Switch',
-      channelDescription: 'Notify when phase switches',
-      importance: Importance.max,
-      priority: Priority.high,
-      icon: 'ic_stat_notify', // Notification icon (must be in drawable folder)
-    );
-
-    await flutterLocalNotificationsPlugin!.show(
-      999,
-      'Test Notification',
-      'If you see this, notifications are working!',
-      NotificationDetails(android: notificationDetails),
-    );
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Test notification sent!')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Test notification sent!')),
+        );
+      }
+    } catch (e, stackTrace) {
+      print('[ERROR] Failed to show test notification: $e');
+      print('[ERROR] Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error showing notification: $e')),
+        );
+      }
     }
   }
 
@@ -647,6 +929,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    _windowsWarningTimer?.cancel();
+    _windowsPhaseSwitchTimer?.cancel();
     // Always disable wake lock when disposing
     WakelockPlus.disable();
     super.dispose();
@@ -661,6 +945,24 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Uptime'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => SettingsScreen(
+                    themeMode: widget.themeMode,
+                    onThemeModeChanged: widget.onThemeModeChanged,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child:
@@ -981,6 +1283,74 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
                     const SizedBox(height: 16),
                   ],
                 ),
+      ),
+    );
+  }
+}
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+      ),
+      body: ListView(
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              'Appearance',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('System default'),
+            subtitle: const Text('Follow device light/dark setting'),
+            value: ThemeMode.system,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Light'),
+            value: ThemeMode.light,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Dark'),
+            value: ThemeMode.dark,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
       ),
     );
   }

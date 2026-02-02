@@ -1,7 +1,7 @@
 name: Uptime
 description: "A simple sit/stand timer app for Android and iOS called Uptime."
 publish_to: 'none'
-version: 0.1.0-alpha.1
+version: 0.1.0-alpha.3
 
 environment:
   sdk: ^3.7.2
@@ -9,9 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_local_notifications: ^17.1.2
+  shared_preferences: ^2.3.3
+  flutter_local_notifications: ^19.5.0
   flutter_timezone: 4.1.1
-  timezone: ^0.9.4
+  timezone: ^0.10.0
   permission_handler: ^11.3.1
   android_intent_plus: ^5.3.0
   wakelock_plus: ^1.2.8
@@ -26,9 +27,12 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-flutter_icons:
+flutter_launcher_icons:
   android: true
   ios: true
+  windows:
+    generate: true
+    icon_size: 48
   image_path: "assets/logo.png"
 
 
