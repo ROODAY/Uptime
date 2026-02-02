@@ -9,22 +9,77 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const String _themeModeKey = 'theme_mode';
 
 void main() {
   runApp(const MainApp());
 }
 
-class MainApp extends StatelessWidget {
+class MainApp extends StatefulWidget {
   const MainApp({super.key});
 
   @override
+  State<MainApp> createState() => _MainAppState();
+}
+
+class _MainAppState extends State<MainApp> {
+  ThemeMode _themeMode = ThemeMode.system;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadThemeMode();
+  }
+
+  Future<void> _loadThemeMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(_themeModeKey);
+    if (stored == null) return;
+    final mode = switch (stored) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+    if (mounted) setState(() => _themeMode = mode);
+  }
+
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    setState(() => _themeMode = mode);
+    final prefs = await SharedPreferences.getInstance();
+    final value = switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.dark => 'dark',
+      ThemeMode.system => 'system',
+    };
+    await prefs.setString(_themeModeKey, value);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const MaterialApp(home: UptimeScreen());
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(brightness: Brightness.light),
+      darkTheme: ThemeData(brightness: Brightness.dark),
+      themeMode: _themeMode,
+      home: UptimeScreen(
+        themeMode: _themeMode,
+        onThemeModeChanged: _setThemeMode,
+      ),
+    );
   }
 }
 
 class UptimeScreen extends StatefulWidget {
-  const UptimeScreen({super.key});
+  const UptimeScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
 
   @override
   State<UptimeScreen> createState() => _UptimeScreenState();
@@ -890,6 +945,24 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Uptime'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => SettingsScreen(
+                    themeMode: widget.themeMode,
+                    onThemeModeChanged: widget.onThemeModeChanged,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child:
@@ -1210,6 +1283,74 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
                     const SizedBox(height: 16),
                   ],
                 ),
+      ),
+    );
+  }
+}
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+      ),
+      body: ListView(
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              'Appearance',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('System default'),
+            subtitle: const Text('Follow device light/dark setting'),
+            value: ThemeMode.system,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Light'),
+            value: ThemeMode.light,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Dark'),
+            value: ThemeMode.dark,
+            groupValue: themeMode,
+            onChanged: (value) {
+              if (value != null) {
+                onThemeModeChanged(value);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
       ),
     );
   }

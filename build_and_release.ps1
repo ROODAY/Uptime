@@ -55,9 +55,113 @@ flutter build windows --release
 
 if ($LASTEXITCODE -eq 0) {
     $windowsBuildPath = "build\windows\x64\runner\Release"
+    $exePath = "$windowsBuildPath\uptime.exe"
     $outputZip = "releases\uptime-windows-$version.zip"
     
     if (Test-Path $windowsBuildPath) {
+        # Code signing (optional)
+        # Set environment variables to configure signing:
+        #   $env:WINDOWS_SIGN_CERT_PATH = "path\to\certificate.pfx"
+        #   $env:WINDOWS_SIGN_CERT_PASSWORD = "password"
+        #   OR
+        #   $env:WINDOWS_SIGN_CERT_THUMBPRINT = "thumbprint" (for certificate store)
+        #   $env:WINDOWS_SIGN_CERT_STORE = "My" (optional, defaults to "My")
+        
+        if (Test-Path $exePath) {
+            $shouldSign = $false
+            $signMethod = $null
+            
+            # Check for PFX certificate file
+            if ($env:WINDOWS_SIGN_CERT_PATH -and (Test-Path $env:WINDOWS_SIGN_CERT_PATH)) {
+                $shouldSign = $true
+                $signMethod = "pfx"
+            }
+            # Check for certificate store thumbprint
+            elseif ($env:WINDOWS_SIGN_CERT_THUMBPRINT) {
+                $shouldSign = $true
+                $signMethod = "store"
+            }
+            
+            if ($shouldSign) {
+                Write-Host "Signing Windows executable..." -ForegroundColor Cyan
+                
+                # Find signtool.exe (usually in Windows SDK)
+                $signtool = $null
+                $sdkPaths = @(
+                    "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe",
+                    "${env:ProgramFiles}\Windows Kits\10\bin\*\x64\signtool.exe"
+                )
+                
+                foreach ($path in $sdkPaths) {
+                    $found = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    if ($found) {
+                        $signtool = $found.FullName
+                        break
+                    }
+                }
+                
+                if (-not $signtool) {
+                    Write-Host "WARNING: signtool.exe not found. Skipping code signing." -ForegroundColor Yellow
+                    Write-Host "  Install Windows SDK or provide path to signtool.exe" -ForegroundColor Gray
+                } else {
+                    try {
+                        if ($signMethod -eq "pfx") {
+                            $certPassword = $env:WINDOWS_SIGN_CERT_PASSWORD
+                            if (-not $certPassword) {
+                                Write-Host "WARNING: WINDOWS_SIGN_CERT_PASSWORD not set. Skipping code signing." -ForegroundColor Yellow
+                            } else {
+                                # Sign with PFX file
+                                $signArgs = @(
+                                    "sign",
+                                    "/f", $env:WINDOWS_SIGN_CERT_PATH,
+                                    "/p", $certPassword,
+                                    "/tr", "http://timestamp.digicert.com",
+                                    "/td", "sha256",
+                                    "/fd", "sha256",
+                                    "`"$exePath`""
+                                )
+                                & $signtool $signArgs
+                                
+                                if ($LASTEXITCODE -eq 0) {
+                                    Write-Host "✓ Executable signed successfully" -ForegroundColor Green
+                                } else {
+                                    Write-Host "WARNING: Code signing failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+                                }
+                            }
+                        } elseif ($signMethod -eq "store") {
+                            $thumbprint = $env:WINDOWS_SIGN_CERT_THUMBPRINT
+                            $store = if ($env:WINDOWS_SIGN_CERT_STORE) { $env:WINDOWS_SIGN_CERT_STORE } else { "My" }
+                            
+                            # Sign with certificate from store
+                            $signArgs = @(
+                                "sign",
+                                "/sha1", $thumbprint,
+                                "/tr", "http://timestamp.digicert.com",
+                                "/td", "sha256",
+                                "/fd", "sha256",
+                                "`"$exePath`""
+                            )
+                            & $signtool $signArgs
+                            
+                            if ($LASTEXITCODE -eq 0) {
+                                Write-Host "✓ Executable signed successfully" -ForegroundColor Green
+                            } else {
+                                Write-Host "WARNING: Code signing failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+                            }
+                        }
+                    } catch {
+                        Write-Host "WARNING: Error during code signing: $_" -ForegroundColor Yellow
+                    }
+                }
+            } else {
+                Write-Host "Note: Code signing skipped (no certificate configured)" -ForegroundColor Gray
+                Write-Host "  To enable signing, set environment variables:" -ForegroundColor Gray
+                Write-Host "    WINDOWS_SIGN_CERT_PATH and WINDOWS_SIGN_CERT_PASSWORD (for PFX file)" -ForegroundColor Gray
+                Write-Host "    OR" -ForegroundColor Gray
+                Write-Host "    WINDOWS_SIGN_CERT_THUMBPRINT (for certificate store)" -ForegroundColor Gray
+            }
+        }
+        
         # Create a temporary directory for the Windows release
         $tempDir = "releases\temp-windows-$version"
         if (Test-Path $tempDir) {

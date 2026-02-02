@@ -91,6 +91,41 @@ The `build_and_release.ps1` script automatically builds Windows and creates a ZI
 
 **Note:** For a more professional installer (MSIX), you can use the `msix` package, but the ZIP approach is simpler and works well for distribution.
 
+### Code Signing Windows Executable
+
+To avoid the "Unknown Publisher" warning when users run your Windows executable, you can sign it with a code signing certificate. The build script supports automatic code signing if configured.
+
+**Option 1: Using a PFX Certificate File**
+
+1. Obtain a code signing certificate (from a Certificate Authority like DigiCert, Sectigo, etc.) or create a self-signed certificate for testing
+2. Set environment variables before running the build script:
+   ```powershell
+   $env:WINDOWS_SIGN_CERT_PATH = "C:\path\to\your\certificate.pfx"
+   $env:WINDOWS_SIGN_CERT_PASSWORD = "your-certificate-password"
+   .\build_and_release.ps1
+   ```
+
+**Option 2: Using a Certificate from Windows Certificate Store**
+
+1. Import your certificate into the Windows certificate store
+2. Find the certificate thumbprint:
+   ```powershell
+   Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object {$_.Subject -like "*Your Name*"} | Select-Object Thumbprint, Subject
+   ```
+3. Set environment variables before running the build script:
+   ```powershell
+   $env:WINDOWS_SIGN_CERT_THUMBPRINT = "your-certificate-thumbprint"
+   $env:WINDOWS_SIGN_CERT_STORE = "My"  # Optional, defaults to "My"
+   .\build_and_release.ps1
+   ```
+
+**Requirements:**
+- Windows SDK must be installed (for `signtool.exe`)
+- The script will automatically locate `signtool.exe` in the Windows SDK installation
+- If no certificate is configured, the build will complete without signing (you'll see a note in the output)
+
+**Note:** Self-signed certificates will still show a warning, but it's better than "Unknown Publisher". For production releases, use a certificate from a trusted Certificate Authority.
+
 ### Testing Notifications on Windows
 
 The app uses `flutter_local_notifications` which supports Windows. Notifications will appear in the Windows notification center:
