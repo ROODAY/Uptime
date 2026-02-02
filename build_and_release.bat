@@ -26,10 +26,10 @@ if not exist releases mkdir releases
 set ANDROID_SUCCESS=0
 set WINDOWS_SUCCESS=0
 
-REM Build Android APK
+REM Build Android APK (arm64 only for smaller size; no Play Store)
 echo.
-echo Building Android APK for version %VERSION%...
-flutter build apk --release
+echo Building Android APK (arm64) for version %VERSION%...
+flutter build apk --release --target-platform android-arm64
 
 if not errorlevel 1 (
     set APK_PATH=build\app\outputs\flutter-apk\app-release.apk

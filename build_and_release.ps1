@@ -28,9 +28,9 @@ $buildSuccess = @{
     Windows = $false
 }
 
-# Build Android APK
-Write-Host "`nBuilding Android APK for version $version..." -ForegroundColor Cyan
-flutter build apk --release
+# Build Android APK (arm64 only for smaller size; no Play Store)
+Write-Host "`nBuilding Android APK (arm64) for version $version..." -ForegroundColor Cyan
+flutter build apk --release --target-platform android-arm64
 
 if ($LASTEXITCODE -eq 0) {
     $apkPath = "build\app\outputs\flutter-apk\app-release.apk"

@@ -26,10 +26,10 @@ mkdir -p releases
 ANDROID_SUCCESS=0
 WINDOWS_SUCCESS=0
 
-# Build Android APK
+# Build Android APK (arm64 only for smaller size; no Play Store)
 echo ""
-echo "Building Android APK for version $VERSION..."
-if flutter build apk --release; then
+echo "Building Android APK (arm64) for version $VERSION..."
+if flutter build apk --release --target-platform android-arm64; then
     APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
     OUTPUT_APK="releases/uptime-${VERSION}.apk"
     
