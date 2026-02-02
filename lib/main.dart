@@ -96,8 +96,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   bool isRunning = false;
   bool isPaused = false;
   Timer? _timer;
-  Timer? _windowsWarningTimer; // For Windows warning notification
-  Timer? _windowsPhaseSwitchTimer; // For Windows phase switch notification
+  Timer? _scheduledWarningTimer; // Windows/Linux: warning notification
+  Timer? _scheduledPhaseSwitchTimer; // Windows/Linux: phase switch notification
   int _remainingSeconds = 0;
   int _walkCycleCounter = 0;
   bool developerMode = false;
@@ -248,8 +248,38 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
           _notificationsInitialized = false;
           rethrow;
         }
+      } else if (Platform.isIOS || Platform.isMacOS) {
+        const DarwinInitializationSettings darwinSettings =
+            DarwinInitializationSettings();
+        const InitializationSettings initializationSettings =
+            InitializationSettings(
+          iOS: darwinSettings,
+          macOS: darwinSettings,
+        );
+        final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+          initializationSettings,
+          onDidReceiveNotificationResponse: _onNotificationResponse,
+          onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+        );
+        _notificationsInitialized = initialized ?? false;
+        if (kDebugMode) {
+          print('[DEBUG] Darwin (iOS/macOS) notifications initialized: ${initialized ?? false}');
+        }
+      } else if (Platform.isLinux) {
+        const LinuxInitializationSettings linuxSettings =
+            LinuxInitializationSettings(defaultActionName: 'Open');
+        const InitializationSettings initializationSettings =
+            InitializationSettings(linux: linuxSettings);
+        final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+          initializationSettings,
+          onDidReceiveNotificationResponse: _onNotificationResponse,
+          onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+        );
+        _notificationsInitialized = initialized ?? false;
+        if (kDebugMode) {
+          print('[DEBUG] Linux notifications initialized: ${initialized ?? false}');
+        }
       } else {
-        // Fallback for other platforms (iOS, macOS, Linux)
         const InitializationSettings initializationSettings =
             InitializationSettings();
         final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
@@ -278,11 +308,31 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   Future<bool> _requestNotificationPermission() async {
-    // Windows doesn't require notification permissions
-    if (Platform.isWindows) {
+    // Windows and Linux don't require notification permissions (or use system default)
+    if (Platform.isWindows || Platform.isLinux) {
       return true;
     }
-    
+    if (Platform.isIOS || Platform.isMacOS) {
+      final status = await Permission.notification.request();
+      if (!status.isGranted && mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Notification Permission'),
+            content: const Text(
+              'Please enable notifications in Settings to receive reminders.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+      return status.isGranted;
+    }
     final platform = Theme.of(context).platform;
     if (platform == TargetPlatform.android) {
       // Request notification permission (required for Android 13+)
@@ -437,10 +487,10 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       }
       
       // Cancel any existing Windows warning timer
-      _windowsWarningTimer?.cancel();
+      _scheduledWarningTimer?.cancel();
       
       // Use a Timer to show the notification after the delay
-      _windowsWarningTimer = Timer(Duration(seconds: scheduleDelay), () async {
+      _scheduledWarningTimer = Timer(Duration(seconds: scheduleDelay), () async {
         const WindowsNotificationDetails windowsNotificationDetails =
             WindowsNotificationDetails();
         try {
@@ -460,6 +510,63 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
         final scheduledTime = DateTime.now().add(Duration(seconds: scheduleDelay));
         print('[DEBUG] Warning notification scheduled via Timer for: $scheduledTime');
       }
+    } else if (Platform.isIOS || Platform.isMacOS) {
+      const DarwinNotificationDetails darwinDetails =
+          DarwinNotificationDetails(presentSound: true, presentAlert: true);
+      if (scheduleDelay <= 0) {
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon.',
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+        );
+        return;
+      }
+      final scheduledTime = tz.TZDateTime.now(tz.local).add(Duration(seconds: scheduleDelay));
+      try {
+        await flutterLocalNotificationsPlugin!.zonedSchedule(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon.',
+          scheduledTime,
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+      } catch (e) {
+        print('[ERROR] Failed to schedule warning notification: $e');
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon.',
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+        );
+      }
+    } else if (Platform.isLinux) {
+      print('[DEBUG] Scheduling warning: delay=$scheduleDelay seconds (Linux)');
+      if (scheduleDelay <= 0) {
+        const LinuxNotificationDetails linuxDetails = LinuxNotificationDetails();
+        await flutterLocalNotificationsPlugin!.show(
+          0,
+          'Phase ending soon',
+          'Current phase ($currentPhase) will end soon.',
+          const NotificationDetails(linux: linuxDetails),
+        );
+        return;
+      }
+      _scheduledWarningTimer?.cancel();
+      _scheduledWarningTimer = Timer(Duration(seconds: scheduleDelay), () async {
+        const LinuxNotificationDetails linuxDetails = LinuxNotificationDetails();
+        try {
+          await flutterLocalNotificationsPlugin!.show(
+            0,
+            'Phase ending soon',
+            'Current phase ($currentPhase) will end soon.',
+            const NotificationDetails(linux: linuxDetails),
+          );
+        } catch (e) {
+          print('[ERROR] Failed to show warning notification: $e');
+        }
+      });
     }
   }
 
@@ -554,8 +661,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
 
       if (secondsUntilSwitch <= 0) {
         // Cancel the warning notification (ID 0) when phase switch happens
-        _windowsWarningTimer?.cancel();
-        _windowsPhaseSwitchTimer?.cancel();
+        _scheduledWarningTimer?.cancel();
+        _scheduledPhaseSwitchTimer?.cancel();
         await flutterLocalNotificationsPlugin!.cancel(0);
         await flutterLocalNotificationsPlugin!.show(
           1,
@@ -567,13 +674,13 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       }
       
       // Cancel any existing Windows phase switch timer
-      _windowsPhaseSwitchTimer?.cancel();
+      _scheduledPhaseSwitchTimer?.cancel();
       
       // Use a Timer to show the notification after the delay
-      _windowsPhaseSwitchTimer = Timer(Duration(seconds: secondsUntilSwitch), () async {
+      _scheduledPhaseSwitchTimer = Timer(Duration(seconds: secondsUntilSwitch), () async {
         try {
           // Cancel warning notification when phase switch fires
-          _windowsWarningTimer?.cancel();
+          _scheduledWarningTimer?.cancel();
           await flutterLocalNotificationsPlugin!.cancel(0);
           await flutterLocalNotificationsPlugin!.show(
             1,
@@ -594,7 +701,77 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       
       // Cancel the warning notification when phase switch is very close
       if (secondsUntilSwitch <= 5) {
-        _windowsWarningTimer?.cancel();
+        _scheduledWarningTimer?.cancel();
+        await flutterLocalNotificationsPlugin!.cancel(0);
+      }
+    } else if (Platform.isIOS || Platform.isMacOS) {
+      const DarwinNotificationDetails darwinDetails =
+          DarwinNotificationDetails(presentSound: true, presentAlert: true);
+      if (secondsUntilSwitch <= 0) {
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+        );
+        return;
+      }
+      final scheduledTime = tz.TZDateTime.now(tz.local).add(Duration(seconds: secondsUntilSwitch));
+      try {
+        await flutterLocalNotificationsPlugin!.zonedSchedule(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          scheduledTime,
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+      } catch (e) {
+        print('[ERROR] Failed to schedule phase switch notification: $e');
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+        );
+      }
+      if (secondsUntilSwitch <= 5) {
+        await flutterLocalNotificationsPlugin!.cancel(0);
+      }
+    } else if (Platform.isLinux) {
+      print('[DEBUG] Scheduling phase switch (Linux): nextPhase=$nextPhase, delay=$secondsUntilSwitch seconds');
+      const LinuxNotificationDetails linuxDetails = LinuxNotificationDetails();
+      if (secondsUntilSwitch <= 0) {
+        _scheduledWarningTimer?.cancel();
+        _scheduledPhaseSwitchTimer?.cancel();
+        await flutterLocalNotificationsPlugin!.cancel(0);
+        await flutterLocalNotificationsPlugin!.show(
+          1,
+          'Phase switched',
+          'It\'s time to $nextPhase!',
+          const NotificationDetails(linux: linuxDetails),
+        );
+        return;
+      }
+      _scheduledPhaseSwitchTimer?.cancel();
+      _scheduledPhaseSwitchTimer = Timer(Duration(seconds: secondsUntilSwitch), () async {
+        try {
+          _scheduledWarningTimer?.cancel();
+          await flutterLocalNotificationsPlugin!.cancel(0);
+          await flutterLocalNotificationsPlugin!.show(
+            1,
+            'Phase switched',
+            'It\'s time to $nextPhase!',
+            const NotificationDetails(linux: linuxDetails),
+          );
+        } catch (e) {
+          print('[ERROR] Failed to show phase switch notification: $e');
+        }
+      });
+      if (secondsUntilSwitch <= 5) {
+        _scheduledWarningTimer?.cancel();
         await flutterLocalNotificationsPlugin!.cancel(0);
       }
     }
@@ -697,8 +874,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   
   Future<void> _handlePhaseCompleteNotifications(String nextPhase) async {
     // Cancel warning notification when phase completes
-    _windowsWarningTimer?.cancel();
-    _windowsPhaseSwitchTimer?.cancel();
+    _scheduledWarningTimer?.cancel();
+    _scheduledPhaseSwitchTimer?.cancel();
     await flutterLocalNotificationsPlugin?.cancel(0);
     await flutterLocalNotificationsPlugin?.cancel(1);
     
@@ -730,10 +907,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
           }
         }
       } else if (Platform.isWindows) {
-        // Windows doesn't need permission checks
-        // Cancel any pending timers first
-        _windowsWarningTimer?.cancel();
-        _windowsPhaseSwitchTimer?.cancel();
+        _scheduledWarningTimer?.cancel();
+        _scheduledPhaseSwitchTimer?.cancel();
         try {
           const WindowsNotificationDetails windowsNotificationDetails =
               WindowsNotificationDetails();
@@ -742,6 +917,33 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
             'Phase switched',
             'It\'s time to $nextPhase!',
             const NotificationDetails(windows: windowsNotificationDetails),
+          );
+          print('[DEBUG] Phase switch notification shown immediately');
+        } catch (e) {
+          print('[ERROR] Failed to show phase switch notification: $e');
+        }
+      } else if (Platform.isIOS || Platform.isMacOS) {
+        try {
+          const DarwinNotificationDetails darwinDetails =
+              DarwinNotificationDetails(presentSound: true, presentAlert: true);
+          await flutterLocalNotificationsPlugin!.show(
+            1,
+            'Phase switched',
+            'It\'s time to $nextPhase!',
+            const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+          );
+          print('[DEBUG] Phase switch notification shown immediately');
+        } catch (e) {
+          print('[ERROR] Failed to show phase switch notification: $e');
+        }
+      } else if (Platform.isLinux) {
+        try {
+          const LinuxNotificationDetails linuxDetails = LinuxNotificationDetails();
+          await flutterLocalNotificationsPlugin!.show(
+            1,
+            'Phase switched',
+            'It\'s time to $nextPhase!',
+            const NotificationDetails(linux: linuxDetails),
           );
           print('[DEBUG] Phase switch notification shown immediately');
         } catch (e) {
@@ -843,8 +1045,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   void _cancelAllNotifications() {
-    _windowsWarningTimer?.cancel();
-    _windowsPhaseSwitchTimer?.cancel();
+    _scheduledWarningTimer?.cancel();
+    _scheduledPhaseSwitchTimer?.cancel();
     flutterLocalNotificationsPlugin?.cancelAll();
   }
 
@@ -898,7 +1100,6 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
           NotificationDetails(android: notificationDetails),
         );
     } else if (Platform.isWindows) {
-      // Windows doesn't need permission checks
       const WindowsNotificationDetails windowsNotificationDetails =
           WindowsNotificationDetails();
       await flutterLocalNotificationsPlugin!.show(
@@ -906,6 +1107,23 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
         'Test Notification',
         'If you see this, notifications are working!',
         const NotificationDetails(windows: windowsNotificationDetails),
+      );
+    } else if (Platform.isIOS || Platform.isMacOS) {
+      const DarwinNotificationDetails darwinDetails =
+          DarwinNotificationDetails(presentSound: true, presentAlert: true);
+      await flutterLocalNotificationsPlugin!.show(
+        999,
+        'Test Notification',
+        'If you see this, notifications are working!',
+        const NotificationDetails(iOS: darwinDetails, macOS: darwinDetails),
+      );
+    } else if (Platform.isLinux) {
+      const LinuxNotificationDetails linuxDetails = LinuxNotificationDetails();
+      await flutterLocalNotificationsPlugin!.show(
+        999,
+        'Test Notification',
+        'If you see this, notifications are working!',
+        const NotificationDetails(linux: linuxDetails),
       );
     }
 
@@ -929,8 +1147,8 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
-    _windowsWarningTimer?.cancel();
-    _windowsPhaseSwitchTimer?.cancel();
+    _scheduledWarningTimer?.cancel();
+    _scheduledPhaseSwitchTimer?.cancel();
     // Always disable wake lock when disposing
     WakelockPlus.disable();
     super.dispose();

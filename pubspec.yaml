@@ -1,7 +1,7 @@
 name: Uptime
-description: "A simple sit/stand timer app for Android and iOS called Uptime."
+description: "A simple sit/stand timer app (Uptime) for Android, iOS, and desktop (Windows, macOS, Linux)."
 publish_to: 'none'
-version: 0.1.0-alpha.3
+version: 0.1.0-alpha.4
 
 environment:
   sdk: ^3.7.2
@@ -33,6 +33,10 @@ flutter_launcher_icons:
   windows:
     generate: true
     icon_size: 48
+  linux:
+    generate: true
+  macos:
+    generate: true
   image_path: "assets/logo.png"
 
 
