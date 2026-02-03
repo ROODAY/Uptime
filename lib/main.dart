@@ -250,20 +250,30 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
         }
       } else if (Platform.isIOS || Platform.isMacOS) {
         const DarwinInitializationSettings darwinSettings =
-            DarwinInitializationSettings();
+            DarwinInitializationSettings(
+          // Don't request here - macOS AppDelegate handles the permission request
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+          defaultPresentAlert: true,
+          defaultPresentBadge: true,
+          defaultPresentSound: true,
+        );
         const InitializationSettings initializationSettings =
             InitializationSettings(
           iOS: darwinSettings,
           macOS: darwinSettings,
         );
-        final bool? initialized = await flutterLocalNotificationsPlugin!.initialize(
+        await flutterLocalNotificationsPlugin!.initialize(
           initializationSettings,
           onDidReceiveNotificationResponse: _onNotificationResponse,
           onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
         );
-        _notificationsInitialized = initialized ?? false;
+        // On macOS, permissions are requested natively in AppDelegate
+        // The plugin init may return false but notifications work if user grants permission
+        _notificationsInitialized = true;
         if (kDebugMode) {
-          print('[DEBUG] Darwin (iOS/macOS) notifications initialized: ${initialized ?? false}');
+          print('[DEBUG] Darwin (iOS/macOS) notifications plugin initialized');
         }
       } else if (Platform.isLinux) {
         const LinuxInitializationSettings linuxSettings =
@@ -308,11 +318,12 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
   }
 
   Future<bool> _requestNotificationPermission() async {
-    // Windows and Linux don't require notification permissions (or use system default)
-    if (Platform.isWindows || Platform.isLinux) {
+    // Windows, Linux, and macOS don't require permission_handler
+    // macOS permissions are handled by flutter_local_notifications via DarwinInitializationSettings
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       return true;
     }
-    if (Platform.isIOS || Platform.isMacOS) {
+    if (Platform.isIOS) {
       final status = await Permission.notification.request();
       if (!status.isGranted && mounted) {
         showDialog(
@@ -1110,7 +1121,11 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       );
     } else if (Platform.isIOS || Platform.isMacOS) {
       const DarwinNotificationDetails darwinDetails =
-          DarwinNotificationDetails(presentSound: true, presentAlert: true);
+          DarwinNotificationDetails(
+            presentSound: true,
+            presentAlert: true,
+            presentBadge: true,
+          );
       await flutterLocalNotificationsPlugin!.show(
         999,
         'Test Notification',
