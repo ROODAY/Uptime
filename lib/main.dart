@@ -250,7 +250,14 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
         }
       } else if (Platform.isIOS || Platform.isMacOS) {
         const DarwinInitializationSettings darwinSettings =
-            DarwinInitializationSettings();
+            DarwinInitializationSettings(
+          requestAlertPermission: true,
+          requestBadgePermission: true,
+          requestSoundPermission: true,
+          defaultPresentAlert: true,
+          defaultPresentBadge: true,
+          defaultPresentSound: true,
+        );
         const InitializationSettings initializationSettings =
             InitializationSettings(
           iOS: darwinSettings,
@@ -1060,7 +1067,7 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       }
       return;
     }
-    
+
     if (flutterLocalNotificationsPlugin == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1110,7 +1117,11 @@ class _UptimeScreenState extends State<UptimeScreen> with WidgetsBindingObserver
       );
     } else if (Platform.isIOS || Platform.isMacOS) {
       const DarwinNotificationDetails darwinDetails =
-          DarwinNotificationDetails(presentSound: true, presentAlert: true);
+          DarwinNotificationDetails(
+            presentSound: true,
+            presentAlert: true,
+            presentBadge: true,
+          );
       await flutterLocalNotificationsPlugin!.show(
         999,
         'Test Notification',
